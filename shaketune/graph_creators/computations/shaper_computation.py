@@ -205,8 +205,10 @@ class ShaperComputation:
         fr, zeta, _, _ = compute_mechanical_parameters(calib_data.psd_sum, calib_data.freq_bins)
         zeta = zeta if zeta is not None else 0.1
 
-        # First we find the best shapers using the Klipper's standard algorithms. This will give us Klipper's
-        # best shaper choice and the full list of shapers that are set to the current machine response
+        # ±25% bracket centred on the measured zeta, used for worst-case scoring (same pessimization
+        # strategy as Klipper's fixed TEST_DAMPING_RATIOS but anchored to the actual measurement).
+        zeta_bracket = [zeta * 0.75, zeta, zeta * 1.25]
+
         compat = False
         try:
             k_shaper_choice, k_shapers = find_best_shaper_compat(
@@ -217,7 +219,7 @@ class ShaperComputation:
                 scv=scv,
                 shaper_freqs=None,
                 max_smoothing=max_smoothing,
-                test_damping_ratios=None,
+                test_damping_ratios=zeta_bracket,
                 max_freq=max_freq,
                 logger=None,
             )
@@ -251,7 +253,7 @@ class ShaperComputation:
                 scv=scv,
                 shaper_freqs=None,
                 max_smoothing=MIN_SMOOTHING,
-                test_damping_ratios=None,
+                test_damping_ratios=zeta_bracket,
                 max_freq=max_freq,
                 logger=None,
             )
