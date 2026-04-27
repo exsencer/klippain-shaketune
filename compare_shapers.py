@@ -6,14 +6,17 @@ Klipper default: assumes damping_ratio=0.1, pessimizes scoring over fixed [0.075
 S&T modified:   estimates zeta from PSD (corrected half-power), pessimizes over [zeta*0.75, zeta, zeta*1.25].
 
 Usage:
-    python3 compare_shapers.py measurement.csv -k ~/klipper -o comparison.png [--scv 5.0]
+    python3 compare_shapers.py measurement.stdata -k ~/klipper -o comparison.png [--scv 5.0]
+    python3 compare_shapers.py measurement.csv    -k ~/klipper -o comparison.png [--scv 5.0]
 """
 
 import argparse
 import inspect
+import json
 import os
 import sys
 from importlib import import_module
+from io import TextIOWrapper
 from pathlib import Path
 
 import matplotlib
@@ -83,6 +86,45 @@ def get_shaper_vals(shaper, freqs):
     return shaper.vals
 
 
+def load_stdata(path):
+    """Load the first measurement from a Shake&Tune .stdata file as a numpy (N,4) array."""
+    from zstandard import ZstdDecompressor
+    measurements = []
+    with open(path, 'rb') as f:
+        with ZstdDecompressor().stream_reader(f) as decomp:
+            for line in TextIOWrapper(decomp, encoding='utf-8'):
+                if line.strip():
+                    measurements.append(json.loads(line))
+    if not measurements:
+        raise SystemExit(f'Error: {path.name} contains no measurements.')
+    return measurements
+
+
+def load_input_file(path):
+    """Return (name, raw_array) from either a .stdata or a raw accelerometer .csv."""
+    if path.suffix == '.stdata':
+        measurements = load_stdata(path)
+        if len(measurements) > 1:
+            print(f'Note: {path.name} contains {len(measurements)} measurements; using the first one.')
+        m = measurements[0]
+        return m['name'], np.array(m['samples'])
+
+    # CSV path — validate header first
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('#freq,psd_x,psd_y,psd_z'):
+                raise SystemExit(f'Error: {path.name} is a processed PSD file. Use a raw accelerometer CSV.')
+            if line.startswith('#time,accel_x,accel_y,accel_z'):
+                break
+        else:
+            raise SystemExit(f'Error: {path.name} does not look like a Klipper accelerometer CSV.')
+    raw = np.loadtxt(path, comments='#', delimiter=',')
+    if raw.ndim == 1 or raw.shape[1] != 4:
+        raise SystemExit(f'Error: expected 4 columns (time, x, y, z) in {path.name}.')
+    return path.stem, raw
+
+
 def build_shaper_table(kl_shapers, st_shapers, kl_choice_name, st_choice_name):
     kl_map = {s.name: s for s in kl_shapers}
     st_map = {s.name: s for s in st_shapers}
@@ -122,7 +164,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Compare Klipper default vs Shake&Tune dynamic-DR shaper fitting'
     )
-    parser.add_argument('csv', help='Raw Klipper accelerometer CSV file')
+    parser.add_argument('file', help='Shake&Tune .stdata file or raw Klipper accelerometer .csv')
     parser.add_argument('-k', '--klipper-dir', default='~/klipper', help='Klipper installation directory')
     parser.add_argument('-o', '--output', default='shaper_comparison.png', help='Output graph path')
     parser.add_argument('--scv', type=float, default=5.0, help='Square corner velocity (mm/s)')
@@ -141,22 +183,10 @@ def main():
     sc_mod = load_klipper(args.klipper_dir)
     sc = sc_mod.ShaperCalibrate(printer=None)
 
-    # Load raw CSV — validate it's a raw accelerometer file, not a Klipper-processed PSD
-    csv_path = Path(args.csv)
-    with open(csv_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith('#freq,psd_x,psd_y,psd_z'):
-                raise SystemExit(f'Error: {csv_path.name} is a processed PSD file. Use a raw accelerometer CSV.')
-            if line.startswith('#time,accel_x,accel_y,accel_z'):
-                break
-        else:
-            raise SystemExit(f'Error: {csv_path.name} does not look like a Klipper accelerometer CSV.')
-
-    raw = np.loadtxt(csv_path, comments='#', delimiter=',')
-    if raw.ndim == 1 or raw.shape[1] != 4:
-        raise SystemExit(f'Error: expected 4 columns (time, x, y, z) in {csv_path.name}.')
-    calib_data = process_data(sc, raw, csv_path.stem)
+    # Load input file (.stdata or .csv)
+    file_path = Path(args.file)
+    meas_name, raw = load_input_file(file_path)
+    calib_data = process_data(sc, raw, meas_name)
     calib_data.normalize_to_frequencies()
 
     # Estimate damping ratio from the full (untrimmed) PSD — matches S&T's shaper_computation.py
@@ -243,7 +273,7 @@ def main():
     ax.set_ylim(bottom=0)
     ax.legend(fontsize=9, loc='upper right')
     ax.set_title(
-        f'Shaper Fitting Comparison — {csv_path.name}\n'
+        f'Shaper Fitting Comparison — {file_path.name}\n'
         f'fr = {fr:.1f} Hz  |  Klipper DR = 0.100  |  S&T estimated DR = {zeta:.4f}',
         fontsize=12,
     )
