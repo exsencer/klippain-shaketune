@@ -125,39 +125,42 @@ def load_input_file(path):
     return path.stem, raw
 
 
-def build_shaper_table(kl_shapers, st_shapers, kl_choice_name, st_choice_name):
+def build_shaper_table(kl_shapers, single_shapers, bracket_shapers, kl_choice_name, single_choice_name, bracket_choice_name):
     kl_map = {s.name: s for s in kl_shapers}
-    st_map = {s.name: s for s in st_shapers}
+    single_map = {s.name: s for s in single_shapers}
+    bracket_map = {s.name: s for s in bracket_shapers}
     names = [s.name for s in kl_shapers]
 
     col_labels = [
         'Shaper',
-        'KL freq\n(Hz)', 'KL vibrs\n(%)', 'KL max_accel\n(mm/s²)',
-        'S&T freq\n(Hz)', 'S&T vibrs\n(%)', 'S&T max_accel\n(mm/s²)',
-        'Δ max_accel\n(mm/s²)',
+        'KL freq\n(Hz)', 'KL vibrs\n(%)', 'KL accel\n(mm/s²)',
+        'Single ζ freq\n(Hz)', 'Single ζ vibrs\n(%)', 'Single ζ accel\n(mm/s²)',
+        'Bracket ζ freq\n(Hz)', 'Bracket ζ vibrs\n(%)', 'Bracket ζ accel\n(mm/s²)',
     ]
     rows = []
-    highlight = []  # (row_idx, reason)  reason: 'kl', 'st', 'both'
-    for i, name in enumerate(names):
+    # choices: set of (row_idx, method) where method is 'kl', 'single', 'bracket'
+    choices = []
+    for name in names:
         kl = kl_map.get(name)
-        st = st_map.get(name)
-        if kl is None or st is None:
+        sg = single_map.get(name)
+        br = bracket_map.get(name)
+        if kl is None or sg is None or br is None:
             continue
-        delta = st.max_accel - kl.max_accel
         rows.append([
             name.upper(),
             f'{kl.freq:.1f}', f'{kl.vibrs * 100:.1f}', f'{kl.max_accel:.0f}',
-            f'{st.freq:.1f}', f'{st.vibrs * 100:.1f}', f'{st.max_accel:.0f}',
-            f'{delta:+.0f}',
+            f'{sg.freq:.1f}', f'{sg.vibrs * 100:.1f}', f'{sg.max_accel:.0f}',
+            f'{br.freq:.1f}', f'{br.vibrs * 100:.1f}', f'{br.max_accel:.0f}',
         ])
-        if name == kl_choice_name and name == st_choice_name:
-            highlight.append((len(rows) - 1, 'both'))
-        elif name == kl_choice_name:
-            highlight.append((len(rows) - 1, 'kl'))
-        elif name == st_choice_name:
-            highlight.append((len(rows) - 1, 'st'))
+        row_idx = len(rows) - 1
+        if name == kl_choice_name:
+            choices.append((row_idx, 'kl'))
+        if name == single_choice_name:
+            choices.append((row_idx, 'single'))
+        if name == bracket_choice_name:
+            choices.append((row_idx, 'bracket'))
 
-    return col_labels, rows, highlight
+    return col_labels, rows, choices
 
 
 def main():
@@ -203,7 +206,7 @@ def main():
     print(f'Klipper assumed DR : {KLIPPER_DEFAULT_DR}  (bracket: {KLIPPER_TEST_DRS})')
     print(f'S&T estimated DR   : {zeta:.4f}  (bracket: [{zeta_bracket[0]:.4f}, {zeta_bracket[1]:.4f}, {zeta_bracket[2]:.4f}])')
 
-    # --- Run both fittings ---
+    # --- Run all three fittings ---
     kl_choice, kl_shapers = run_fit(
         sc, calib_data,
         damping_ratio=KLIPPER_DEFAULT_DR,
@@ -212,7 +215,15 @@ def main():
         max_smoothing=args.max_smoothing,
         max_freq=args.max_freq,
     )
-    st_choice, st_shapers = run_fit(
+    single_choice, single_shapers = run_fit(
+        sc, calib_data,
+        damping_ratio=zeta,
+        test_drs=[zeta],
+        scv=args.scv,
+        max_smoothing=args.max_smoothing,
+        max_freq=args.max_freq,
+    )
+    bracket_choice, bracket_shapers = run_fit(
         sc, calib_data,
         damping_ratio=zeta,
         test_drs=zeta_bracket,
@@ -222,10 +233,12 @@ def main():
     )
 
     print()
-    print(f'Klipper recommends : {kl_choice.name.upper()} @ {kl_choice.freq:.1f} Hz'
+    print(f'Klipper  (DR=0.100, bracket {KLIPPER_TEST_DRS})  : {kl_choice.name.upper()} @ {kl_choice.freq:.1f} Hz'
           f'  vibrs={kl_choice.vibrs * 100:.1f}%  max_accel={kl_choice.max_accel:.0f} mm/s²')
-    print(f'S&T recommends     : {st_choice.name.upper()} @ {st_choice.freq:.1f} Hz'
-          f'  vibrs={st_choice.vibrs * 100:.1f}%  max_accel={st_choice.max_accel:.0f} mm/s²')
+    print(f'S&T single ζ={zeta:.4f}                          : {single_choice.name.upper()} @ {single_choice.freq:.1f} Hz'
+          f'  vibrs={single_choice.vibrs * 100:.1f}%  max_accel={single_choice.max_accel:.0f} mm/s²')
+    print(f'S&T bracket [{zeta_bracket[0]:.4f}, {zeta_bracket[1]:.4f}, {zeta_bracket[2]:.4f}]  : {bracket_choice.name.upper()} @ {bracket_choice.freq:.1f} Hz'
+          f'  vibrs={bracket_choice.vibrs * 100:.1f}%  max_accel={bracket_choice.max_accel:.0f} mm/s²')
 
     # --- Graph ---
     plt.style.use('default')
@@ -233,38 +246,29 @@ def main():
     fig.patch.set_facecolor('#f5f5f5')
     gs = gridspec.GridSpec(2, 1, height_ratios=[2.2, 1], hspace=0.45)
 
-    # Top: PSD + attenuated spectra for each recommendation
+    # Top: PSD + attenuated spectra for all three recommendations
     ax = fig.add_subplot(gs[0])
     ax.set_facecolor('white')
     ax.plot(plot_freqs, plot_psd, color='#4c72b0', linewidth=1.2, label='Raw PSD', alpha=0.5)
 
     kl_map = {s.name: s for s in kl_shapers}
-    st_map = {s.name: s for s in st_shapers}
+    single_map = {s.name: s for s in single_shapers}
+    bracket_map = {s.name: s for s in bracket_shapers}
 
-    kl_shaper_obj = kl_map.get(kl_choice.name, kl_shapers[0])
-    st_shaper_obj = st_map.get(st_choice.name, st_shapers[0])
-    kl_vals = get_shaper_vals(kl_shaper_obj, plot_freqs)
-    st_vals = get_shaper_vals(st_shaper_obj, plot_freqs)
-
-    same_choice = kl_choice.name == st_choice.name
-
-    ax.plot(
-        plot_freqs, plot_psd * kl_vals,
-        color='#dd4444', linewidth=1.8,
-        label=f'Klipper ({kl_choice.name.upper()} @ {kl_choice.freq:.1f} Hz, DR=0.100, max_accel={kl_choice.max_accel:.0f})',
-    )
-    if same_choice:
-        ax.plot(
-            plot_freqs, plot_psd * st_vals,
-            color='#2aa04a', linewidth=1.8, linestyle='--',
-            label=f'S&T ({st_choice.name.upper()} @ {st_choice.freq:.1f} Hz, DR={zeta:.3f}, max_accel={st_choice.max_accel:.0f}) [same type]',
-        )
-    else:
-        ax.plot(
-            plot_freqs, plot_psd * st_vals,
-            color='#2aa04a', linewidth=1.8,
-            label=f'S&T ({st_choice.name.upper()} @ {st_choice.freq:.1f} Hz, DR={zeta:.3f}, max_accel={st_choice.max_accel:.0f})',
-        )
+    curves = [
+        (kl_map.get(kl_choice.name, kl_shapers[0]),
+         '#dd4444',
+         f'Klipper  {kl_choice.name.upper()} @ {kl_choice.freq:.1f} Hz  DR=0.100  accel={kl_choice.max_accel:.0f}'),
+        (single_map.get(single_choice.name, single_shapers[0]),
+         '#e07b00',
+         f'Single ζ  {single_choice.name.upper()} @ {single_choice.freq:.1f} Hz  ζ={zeta:.3f}  accel={single_choice.max_accel:.0f}'),
+        (bracket_map.get(bracket_choice.name, bracket_shapers[0]),
+         '#2aa04a',
+         f'Bracket ζ  {bracket_choice.name.upper()} @ {bracket_choice.freq:.1f} Hz  ζ={zeta:.3f}±25%  accel={bracket_choice.max_accel:.0f}'),
+    ]
+    for shaper_obj, color, label in curves:
+        vals = get_shaper_vals(shaper_obj, plot_freqs)
+        ax.plot(plot_freqs, plot_psd * vals, color=color, linewidth=1.8, label=label)
 
     ax.axvline(fr, color='#888', linewidth=1.0, linestyle=':', alpha=0.8, label=f'fr = {fr:.1f} Hz')
     ax.set_xlabel('Frequency (Hz)', fontsize=11)
@@ -279,12 +283,13 @@ def main():
     )
     ax.grid(True, alpha=0.3)
 
-    # Bottom: comparison table
+    # Bottom: comparison table (all three methods)
     ax_tbl = fig.add_subplot(gs[1])
     ax_tbl.axis('off')
 
-    col_labels, rows, highlight_rows = build_shaper_table(
-        kl_shapers, st_shapers, kl_choice.name, st_choice.name
+    col_labels, rows, choices = build_shaper_table(
+        kl_shapers, single_shapers, bracket_shapers,
+        kl_choice.name, single_choice.name, bracket_choice.name,
     )
 
     tbl = ax_tbl.table(
@@ -294,29 +299,36 @@ def main():
         cellLoc='center',
     )
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(9)
+    tbl.set_fontsize(8)
     tbl.scale(1, 1.6)
 
-    highlight_colors = {'kl': '#ffd6d6', 'st': '#d6f5d6', 'both': '#d6eaf8'}
-    highlight_map = {r: reason for r, reason in highlight_rows}
+    # Column ranges for each method (0-indexed after the Shaper name col)
+    METHOD_COLS = {'kl': range(1, 4), 'single': range(4, 7), 'bracket': range(7, 10)}
+    METHOD_COLORS = {'kl': '#ffd6d6', 'single': '#fff0d6', 'bracket': '#d6f5d6'}
+
+    # Build a per-row set of highlighted methods
+    row_methods = {}
+    for row_idx, method in choices:
+        row_methods.setdefault(row_idx, set()).add(method)
 
     for (row, col), cell in tbl.get_celld().items():
         if row == 0:
             cell.set_facecolor('#dde4ed')
-            cell.set_text_props(fontweight='bold', fontsize=8)
+            cell.set_text_props(fontweight='bold', fontsize=7)
         else:
             data_row = row - 1
-            reason = highlight_map.get(data_row)
-            cell.set_facecolor(highlight_colors[reason] if reason else 'white')
-
-            # Bold the Δ column if it's a highlighted row
-            if col == len(col_labels) - 1 and reason:
-                cell.set_text_props(fontweight='bold')
+            methods = row_methods.get(data_row, set())
+            # Find which method owns this column and highlight if it's a chosen method
+            cell_color = 'white'
+            for method, col_range in METHOD_COLS.items():
+                if col in col_range and method in methods:
+                    cell_color = METHOD_COLORS[method]
+                    break
+            cell.set_facecolor(cell_color)
         cell.set_edgecolor('#cccccc')
 
     legend_text = (
-        '  Shading:  red = Klipper choice   green = S&T choice   blue = both agree  '
-        '  Δ max_accel = S&T minus Klipper'
+        '  Column shading:  red = Klipper choice   orange = Single ζ choice   green = Bracket ζ choice'
     )
     ax_tbl.set_title(legend_text, fontsize=8, color='#555', pad=4)
 
