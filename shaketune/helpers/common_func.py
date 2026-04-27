@@ -68,7 +68,7 @@ def compute_mechanical_parameters(psd, freqs, min_freq=None):
     fr = freqs[max_power_index]
     max_power = psd[max_power_index]
 
-    half_power = max_power / math.sqrt(2)
+    half_power = max_power / 2.0
     indices_below = np.where(psd[:max_power_index] <= half_power)[0]
     indices_above = np.where(psd[max_power_index:] <= half_power)[0]
 
